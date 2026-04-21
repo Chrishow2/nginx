@@ -1,0 +1,11 @@
+#version: "3.9"
+
+services:
+  nginx:
+    build: .
+    container_name: nginx_host
+    network_mode: "host"
+    volumes:
+      - ./conf.d:/etc/nginx/conf.d:rw
+      - ./certs:/etc/letsencrypt:rw
+    restart: unless-stopped
