@@ -37,6 +37,16 @@
     .dns-box { display: none; margin-top: 0.75rem; padding: 0.75rem; background: var(--bg); border-radius: 6px; border: 1px solid #30363d; }
     .dns-box.show { display: block; }
     .hidden { display: none !important; }
+    .view { display: block; }
+    nav.app-nav {
+      display: flex; gap: 0.5rem; margin-bottom: 1.25rem; border-bottom: 1px solid #30363d; padding-bottom: 0.5rem; flex-wrap: wrap;
+    }
+    nav.app-nav button {
+      background: transparent; border: none; color: var(--muted); cursor: pointer; font: inherit; font-size: 0.95rem;
+      padding: 0.45rem 0.75rem; border-radius: 6px;
+    }
+    nav.app-nav button:hover { color: var(--text); }
+    nav.app-nav button.active { color: var(--text); background: #30363d; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -47,6 +57,12 @@
     <h1>nginx vhost admin</h1>
     <p style="color: var(--muted); margin-top: -0.5rem;">Manage <code>conf.d</code> and Let&apos;s Encrypt (HTTP-01 webroot or DNS-01 manual TXT).</p>
 
+    <nav class="app-nav" aria-label="main">
+      <button type="button" class="active" id="navProxies">Proxy Hosts</button>
+      <button type="button" id="navCerts">Certificates</button>
+    </nav>
+
+    <div id="viewProxies" class="view">
     <div class="panel">
       <h2 style="margin-top:0;">New vhost</h2>
       <form id="formCreate">
@@ -94,15 +110,28 @@
         <label for="edit_upstream">Upstream URL</label>
         <input id="edit_upstream" name="upstream" type="url" required>
 
+        <label for="edit_certificate">Certificate</label>
+        <select id="edit_certificate" name="certificate">
+          <option value="">None</option>
+        </select>
+        <p class="hint" style="margin-bottom: 0.75rem;">None = HTTP only. Choose a name from the Certificates list to enable HTTPS. Renaming the server block may require a matching cert on disk.</p>
+
         <div class="edit-actions">
           <button type="submit">Save</button>
           <button type="button" class="secondary" id="edit_cancel">Cancel</button>
         </div>
       </form>
     </div>
+    </div>
 
+    <div id="viewCerts" class="view" style="display: none;">
     <div class="panel">
-      <h2 style="margin-top:0;">Issue certificate</h2>
+      <h2 style="margin-top:0;">Certificates</h2>
+      <p class="hint" style="margin-top:0; margin-bottom:0.75rem;">Let&apos;s Encrypt cert identities (folders with <code>fullchain.pem</code> and <code>privkey.pem</code>) the API is configured to read.</p>
+      <div id="certTableWrap"><p style="color: var(--muted);">Loading…</p></div>
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0;">Add certificate</h2>
       <form id="formCert">
         <label for="cert_name">Server name</label>
         <input id="cert_name" name="server_name" type="text" required pattern="[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|[a-zA-Z0-9]" placeholder="app.example.com">
@@ -121,16 +150,40 @@
           <input id="cert_upstream" name="upstream" type="url" placeholder="http://host.docker.internal:3000">
         </div>
 
-        <p class="hint" style="margin-bottom: 0.85rem;">Expects an HTTP vhost for that name (e.g. created above), unless you use DNS-01 with upstream only. Preserves <code>proxy_pass</code> from the existing file when present.</p>
+        <p class="hint" style="margin-bottom: 0.85rem;">Expects an HTTP vhost for that name (e.g. from Proxy Hosts), unless you use DNS-01 with upstream only. Preserves <code>proxy_pass</code> from the existing file when present.</p>
 
         <button type="submit">Run certbot</button>
       </form>
       <div id="certDnsJob" class="dns-box"></div>
     </div>
+    </div>
   </main>
   <script>
     const flashOk = document.getElementById('flashOk');
     const flashErr = document.getElementById('flashErr');
+    let editStartHadSsl = false;
+
+    function showView(which) {
+      const proxies = document.getElementById('viewProxies');
+      const certs = document.getElementById('viewCerts');
+      const np = document.getElementById('navProxies');
+      const nc = document.getElementById('navCerts');
+      if (which === 'certs') {
+        proxies.style.display = 'none';
+        certs.style.display = 'block';
+        nc.classList.add('active');
+        np.classList.remove('active');
+        void loadCertificateList();
+      } else {
+        certs.style.display = 'none';
+        proxies.style.display = 'block';
+        np.classList.add('active');
+        nc.classList.remove('active');
+      }
+    }
+
+    document.getElementById('navProxies').addEventListener('click', () => showView('proxies'));
+    document.getElementById('navCerts').addEventListener('click', () => showView('certs'));
 
     function showOk(msg) {
       flashErr.classList.remove('show');
@@ -149,6 +202,58 @@
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+    }
+
+    async function loadCertificateList() {
+      const wrap = document.getElementById('certTableWrap');
+      if (!wrap) return;
+      try {
+        const r = await fetch('/api/certificates');
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || r.statusText);
+        const list = d.certificates || [];
+        if (list.length === 0) {
+          wrap.innerHTML = '<p style="color: var(--muted); margin:0;">No certificates found yet. Use <strong>Add certificate</strong> below.</p>';
+          return;
+        }
+        wrap.innerHTML = `
+          <table>
+            <thead><tr><th>Certificate (live directory)</th></tr></thead>
+            <tbody>
+              ${list.map((c) => `<tr><td><code>${escapeHtml(c)}</code></td></tr>`).join('')}
+            </tbody>
+          </table>`;
+      } catch (e) {
+        wrap.innerHTML = '<p style="color:var(--danger)">Failed to load certificates.</p>';
+        showErr(String(e.message || e));
+      }
+    }
+
+    async function fillEditCertificateOptions(currentName) {
+      const sel = document.getElementById('edit_certificate');
+      sel.innerHTML = '<option value="">None</option>';
+      const r = await fetch('/api/certificates');
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || r.statusText);
+      const certs = d.certificates || [];
+      for (const c of certs) {
+        const o = document.createElement('option');
+        o.value = c;
+        o.textContent = c;
+        sel.appendChild(o);
+      }
+      if (currentName && !certs.includes(currentName)) {
+        const o = document.createElement('option');
+        o.value = currentName;
+        o.textContent = currentName + ' (in config only)';
+        sel.appendChild(o);
+      }
+      if (currentName) {
+        sel.value = currentName;
+        if (sel.value !== currentName) sel.value = '';
+      } else {
+        sel.value = '';
+      }
     }
 
     document.getElementById('issue_cert').addEventListener('change', function () {
@@ -271,9 +376,11 @@
               document.getElementById('edit_filename').value = v.filename;
               document.getElementById('edit_server_name').value = (v.server_names && v.server_names[0]) || v.domain;
               document.getElementById('edit_upstream').value = v.upstream || '';
+              editStartHadSsl = !!v.has_ssl;
+              await fillEditCertificateOptions(v.has_ssl && v.ssl_cert_name ? v.ssl_cert_name : null);
               const hint = document.getElementById('edit_rename_hint');
               if (v.has_ssl) {
-                hint.textContent = 'HTTPS enabled: server name cannot be changed here; change upstream only or recreate.';
+                hint.textContent = 'HTTPS enabled: server name cannot be changed here; change upstream or certificate, or set Certificate to None for HTTP only.';
                 document.getElementById('edit_server_name').readOnly = true;
               } else {
                 hint.textContent = 'Renaming updates the config file name (e.g. old.conf → newname.conf).';
@@ -294,24 +401,35 @@
 
     document.getElementById('edit_cancel').addEventListener('click', () => {
       document.getElementById('editPanel').style.display = 'none';
+      editStartHadSsl = false;
     });
+
+    function afterCertOrVhostChange() {
+      void loadVhosts();
+      void loadCertificateList();
+    }
 
     document.getElementById('formEdit').addEventListener('submit', async (ev) => {
       ev.preventDefault();
       const filename = document.getElementById('edit_filename').value;
       const server_name = document.getElementById('edit_server_name').value.trim();
       const upstream = document.getElementById('edit_upstream').value.trim();
+      const certRaw = document.getElementById('edit_certificate').value.trim();
+      if (editStartHadSsl && !certRaw) {
+        if (!confirm('Remove HTTPS and use HTTP only for this host?')) return;
+      }
       try {
         const r = await fetch('/api/vhosts/' + encodeURIComponent(filename), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ server_name, upstream }),
+          body: JSON.stringify({ server_name, upstream, certificate: certRaw || null }),
         });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || r.statusText);
         showOk('Vhost updated.');
         document.getElementById('editPanel').style.display = 'none';
-        await loadVhosts();
+        editStartHadSsl = false;
+        afterCertOrVhostChange();
       } catch (e) {
         showErr(String(e.message || e));
       }
@@ -343,13 +461,14 @@
         if (!r.ok) throw new Error(data.error || r.statusText);
         if (data.asyncCert && data.jobId) {
           showOk('Vhost saved. Complete DNS steps for the certificate.');
-          pollDnsJob(data.jobId, dnsBox, loadVhosts);
+          pollDnsJob(data.jobId, dnsBox, afterCertOrVhostChange);
         } else {
           showOk('Vhost saved' + (issue_cert ? ' and certificate issued.' : '.'));
         }
         ev.target.reset();
         document.getElementById('createChallengeWrap').classList.add('hidden');
         await loadVhosts();
+        if (issue_cert && !data.asyncCert) void loadCertificateList();
       } catch (e) {
         showErr(String(e.message || e));
       }
@@ -376,10 +495,10 @@
         if (!r.ok) throw new Error(data.error || r.statusText);
         if (data.asyncCert && data.jobId) {
           showOk('Add the TXT record when shown, then continue.');
-          pollDnsJob(data.jobId, dnsBox, loadVhosts);
+          pollDnsJob(data.jobId, dnsBox, afterCertOrVhostChange);
         } else {
           showOk('Certificate issued and TLS vhost written.');
-          await loadVhosts();
+          afterCertOrVhostChange();
         }
       } catch (e) {
         showErr(String(e.message || e));
@@ -387,6 +506,7 @@
     });
 
     loadVhosts();
+    void loadCertificateList();
   </script>
 </body>
 </html>

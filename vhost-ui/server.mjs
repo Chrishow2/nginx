@@ -11,6 +11,7 @@ const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const CONF_DIR = process.env.CONF_DIR ?? "/etc/nginx/conf.d";
+const LETSENCRYPT_LIVE = process.env.LETSENCRYPT_LIVE ?? "/etc/letsencrypt/live";
 const WEBROOT = process.env.ACME_WEBROOT ?? "/var/www/certbot";
 const NGINX_CONTAINER = process.env.NGINX_CONTAINER ?? "nginx_host";
 const PORT = Number(process.env.PORT ?? "8080", 10);
@@ -50,7 +51,8 @@ ${proxyBlock(upstream)}
 `;
 }
 
-function tlsServerBlocks(domain, upstream) {
+function tlsServerBlocks(domain, upstream, certName) {
+  const c = certName && String(certName).trim() ? String(certName).trim() : domain;
   return `server {
     listen 80;
     server_name ${domain};
@@ -67,8 +69,8 @@ function tlsServerBlocks(domain, upstream) {
 server {
     listen 443 ssl;
     server_name ${domain};
-    ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
+    ssl_certificate ${LETSENCRYPT_LIVE.replace(/\\/g, "/")}/${c}/fullchain.pem;
+    ssl_certificate_key ${LETSENCRYPT_LIVE.replace(/\\/g, "/")}/${c}/privkey.pem;
 
 ${proxyBlock(upstream)}
 }
@@ -172,11 +174,22 @@ function parseConfText(text) {
   const hasSsl = /\blisten\s+443\s+ssl\b/.test(text) || /\bssl_certificate\b/.test(text);
   const pp = text.match(/proxy_pass\s+([^;]+);/);
   const upstreamRaw = pp ? pp[1].trim() : null;
+  const sslPath = text.match(/ssl_certificate\s+([^;]+);/);
+  let ssl_cert_name = null;
+  if (sslPath) {
+    const p = sslPath[1].trim();
+    const liveNorm = path.normalize(LETSENCRYPT_LIVE).replace(/\\/g, "/");
+    const m = p.replace(/\\/g, "/").match(
+      new RegExp("^" + liveNorm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/([^/]+)/fullchain\\.pem$"),
+    );
+    if (m) ssl_cert_name = m[1];
+  }
   return {
     server_names: names,
     has_ssl: hasSsl,
     upstream: upstreamRaw,
     upstream_display: upstreamRaw ? upstreamForDisplay(upstreamRaw) : null,
+    ssl_cert_name,
   };
 }
 
@@ -314,12 +327,71 @@ async function listVhosts() {
   return out;
 }
 
+const CERT_NAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
+
+function safeCertificateName(s) {
+  if (s == null) return null;
+  const t = String(s).trim();
+  if (t === "") return null;
+  if (t.length === 1) {
+    if (!/^[a-zA-Z0-9]$/.test(t)) {
+      throw new Error("invalid certificate name");
+    }
+    return t;
+  }
+  if (!CERT_NAME_RE.test(t) || t.includes("..") || t.includes("/") || t.includes("\\")) {
+    throw new Error("invalid certificate name");
+  }
+  return t;
+}
+
+async function listCertNames() {
+  let entries;
+  try {
+    entries = await fs.readdir(LETSENCRYPT_LIVE, { withFileTypes: true });
+  } catch (e) {
+    if (e?.code === "ENOENT") {
+      return [];
+    }
+    throw e;
+  }
+  const out = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const name = e.name;
+    if (name === "." || name === ".." || name.includes("..") || /[/\\]/.test(name)) continue;
+    const full = path.join(LETSENCRYPT_LIVE, name);
+    try {
+      await fs.access(path.join(full, "fullchain.pem"));
+      await fs.access(path.join(full, "privkey.pem"));
+      out.push(name);
+    } catch {
+      /* incomplete cert dir */
+    }
+  }
+  out.sort((a, b) => a.localeCompare(b));
+  return out;
+}
+
+async function assertCertificateExists(name) {
+  await fs.access(path.join(LETSENCRYPT_LIVE, name, "fullchain.pem"));
+  await fs.access(path.join(LETSENCRYPT_LIVE, name, "privkey.pem"));
+}
+
 const app = express();
 app.use(express.json({ limit: "48kb" }));
 
 app.get("/api/vhosts", async (_req, res) => {
   try {
     res.json({ vhosts: await listVhosts() });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message ?? e) });
+  }
+});
+
+app.get("/api/certificates", async (_req, res) => {
+  try {
+    res.json({ certificates: await listCertNames() });
   } catch (e) {
     res.status(500).json({ error: String(e.message ?? e) });
   }
@@ -340,6 +412,7 @@ app.get("/api/vhosts/file/:name", async (req, res) => {
       server_names: meta.server_names,
       has_ssl: meta.has_ssl,
       upstream: meta.upstream_display,
+      ssl_cert_name: meta.ssl_cert_name,
       domain: path.basename(base, ".conf"),
     });
   } catch (e) {
@@ -364,6 +437,9 @@ app.put("/api/vhosts/:name", async (req, res) => {
     const newDomain = (body.server_name?.trim() || oldDomain);
     validateDomain(newDomain);
     const up = upstreamForNginxContainer(validateUpstream(body.upstream));
+    const certIn = body.certificate;
+    const certPicked = certIn != null && String(certIn).trim() !== "";
+    const certName = certPicked ? safeCertificateName(String(certIn)) : null;
 
     const text = await fs.readFile(oldPath, "utf8");
     const meta = parseConfText(text);
@@ -373,13 +449,22 @@ app.put("/api/vhosts/:name", async (req, res) => {
       return;
     }
 
+    if (certPicked) {
+      await assertCertificateExists(certName);
+    }
+
     let target = oldPath;
     if (newDomain !== oldDomain) {
       target = confPathForDomain(newDomain);
       await fs.unlink(oldPath);
     }
 
-    const bodyText = meta.has_ssl ? tlsServerBlocks(newDomain, up) : httpServerBlock(newDomain, up);
+    let bodyText;
+    if (certPicked) {
+      bodyText = tlsServerBlocks(newDomain, up, certName);
+    } else {
+      bodyText = httpServerBlock(newDomain, up);
+    }
     await fs.writeFile(target, bodyText, "utf8");
     await reloadNginx();
     res.json({ ok: true, filename: path.basename(target) });
