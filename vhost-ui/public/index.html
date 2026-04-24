@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>nginx vhost admin</title>
+  <title>Better Proxy Manager</title>
   <style>
     :root { --bg: #0f1419; --panel: #1a2332; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --danger: #f85149; --ok: #3fb950; }
     * { box-sizing: border-box; }
@@ -17,9 +17,12 @@
       width: 100%; padding: 0.5rem 0.65rem; border: 1px solid #30363d; border-radius: 6px;
       background: var(--bg); color: var(--text); margin-bottom: 0.85rem;
     }
-    button { padding: 0.45rem 0.9rem; border-radius: 6px; border: none; background: var(--accent); color: #fff; font-weight: 500; cursor: pointer; font-size: 0.9rem; }
-    button.secondary { background: #30363d; color: var(--text); }
-    button.danger { background: var(--danger); }
+    button, a.button-link {
+      display: inline-block; padding: 0.45rem 0.9rem; border-radius: 6px; border: none; background: var(--accent); color: #fff;
+      font-weight: 500; cursor: pointer; font-size: 0.9rem; text-decoration: none; font-family: inherit;
+    }
+    button.secondary, a.button-link.secondary { background: #30363d; color: var(--text); }
+    button.danger, a.button-link.danger { background: var(--danger); }
     form button[type="submit"] { display: block; margin-top: 0.35rem; }
     .edit-actions { display: flex; gap: 0.5rem; margin-top: 0.35rem; }
     .edit-actions button { flex: 1; margin-top: 0; min-width: 0; }
@@ -47,6 +50,29 @@
     }
     nav.app-nav button:hover { color: var(--text); }
     nav.app-nav button.active { color: var(--text); background: #30363d; font-weight: 500; }
+    .panel-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
+    .panel-head h2 { margin: 0; }
+    .panel-head + .hint { margin-top: 0; }
+    .modal-backdrop {
+      position: fixed; inset: 0; z-index: 200;
+      background: rgba(0, 0, 0, 0.55);
+      display: none; align-items: center; justify-content: center; padding: 1rem; overflow-y: auto;
+    }
+    .modal-backdrop[aria-hidden="false"] { display: flex; }
+    .modal { width: 100%; max-width: 28rem; max-height: min(90vh, 40rem);
+      background: var(--panel); border-radius: 8px; padding: 1rem 1.25rem; overflow-y: auto;
+      border: 1px solid #30363d; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    }
+    .modal h2 { font-size: 1.05rem; font-weight: 600; margin: 0 0 0.75rem; color: var(--text); }
+    .modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem; }
+    .modal-header h2 { margin: 0; }
+    .modal-close {
+      background: none; border: none; color: var(--muted); font-size: 1.4rem; line-height: 1; cursor: pointer; padding: 0.1rem 0.35rem; border-radius: 4px; flex-shrink: 0;
+    }
+    .modal-close:hover, .modal-close:focus-visible { color: var(--text); background: #30363d; outline: none; }
+    .modal-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+    .modal-actions button { margin-top: 0; }
+    .modal-actions button[type="submit"] { flex: 1; min-width: 0; }
   </style>
 </head>
 <body>
@@ -54,7 +80,7 @@
     <div id="flashOk" class="flash ok"></div>
     <div id="flashErr" class="flash err"></div>
 
-    <h1>nginx vhost admin</h1>
+    <h1>Better Proxy Manager</h1>
     <p style="color: var(--muted); margin-top: -0.5rem;">Manage <code>conf.d</code> and Let&apos;s Encrypt (HTTP-01 webroot or DNS-01 manual TXT).</p>
 
     <nav class="app-nav" aria-label="main">
@@ -64,38 +90,10 @@
 
     <div id="viewProxies" class="view">
     <div class="panel">
-      <h2 style="margin-top:0;">New vhost</h2>
-      <form id="formCreate">
-        <label for="server_name">Server name</label>
-        <input id="server_name" name="server_name" type="text" placeholder="app.example.com" required pattern="[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|[a-zA-Z0-9]" autocomplete="off">
-
-        <label for="upstream">Upstream URL</label>
-        <input id="upstream" name="upstream" type="url" placeholder="http://host.docker.internal:3000" required>
-        <p class="hint" style="margin-bottom: 0.75rem;">Host apps: use <code>host.docker.internal</code> (or <code>127.0.0.1</code>; the API rewrites loopback for the nginx container).</p>
-
-        <label for="email">Let&apos;s Encrypt email</label>
-        <input id="email" name="email" type="email" placeholder="you@example.com">
-
-        <label class="row" style="margin-bottom: 0.75rem;">
-          <input id="issue_cert" name="issue_cert" type="checkbox" style="width: auto; margin: 0 0.5rem 0 0;">
-          Request certificate after save
-        </label>
-        <div id="createChallengeWrap" class="hidden">
-          <label for="create_challenge">Challenge</label>
-          <select id="create_challenge" name="challenge">
-            <option value="http">HTTP-01 (webroot on this nginx)</option>
-            <option value="dns">DNS-01 (TXT at your DNS provider)</option>
-          </select>
-          <p class="hint" style="margin-bottom: 0.75rem;">HTTP-01 needs port 80 reachable for the hostname. DNS-01 works when HTTP cannot (e.g. internal names).</p>
-        </div>
-        <p class="hint" style="margin-bottom: 0.75rem;">If using HTTP-01, DNS must point here and port 80 must answer for that name.</p>
-        <button type="submit">Create vhost</button>
-      </form>
-      <div id="createDnsJob" class="dns-box"></div>
-    </div>
-
-    <div class="panel">
-      <h2 style="margin-top:0;">Vhosts</h2>
+      <div class="panel-head">
+        <h2>Proxy Hosts</h2>
+        <button type="button" id="openModalNewProxy">New Proxy Host</button>
+      </div>
       <div id="vhostTableWrap"><p style="color: var(--muted);">Loading…</p></div>
     </div>
 
@@ -126,13 +124,42 @@
 
     <div id="viewCerts" class="view" style="display: none;">
     <div class="panel">
-      <h2 style="margin-top:0;">Certificates</h2>
-      <p class="hint" style="margin-top:0; margin-bottom:0.75rem;">Let&apos;s Encrypt cert identities (folders with <code>fullchain.pem</code> and <code>privkey.pem</code>) the API is configured to read.</p>
+      <div class="panel-head">
+        <h2>Certificates</h2>
+        <button type="button" id="openModalAddCert">Add certificate</button>
+      </div>
       <div id="certTableWrap"><p style="color: var(--muted);">Loading…</p></div>
     </div>
-    <div class="panel">
-      <h2 style="margin-top:0;">Add certificate</h2>
-      <form id="formCert">
+    </div>
+
+    <div id="modalNewProxy" class="modal-backdrop" aria-hidden="true" role="presentation">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalNewProxyTitle">
+        <div class="modal-header">
+          <h2 id="modalNewProxyTitle">New Proxy Host</h2>
+          <button type="button" class="modal-close" id="closeModalNewProxy" aria-label="Close">&times;</button>
+        </div>
+        <form id="formCreate">
+        <label for="server_name">Server name</label>
+        <input id="server_name" name="server_name" type="text" placeholder="app.example.com" required pattern="[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|[a-zA-Z0-9]" autocomplete="off">
+
+        <label for="upstream">Upstream URL</label>
+        <input id="upstream" name="upstream" type="url" placeholder="http://host.docker.internal:3000" required>
+        <p class="hint" style="margin-bottom: 0.75rem;">Host apps: use <code>host.docker.internal</code> (or <code>127.0.0.1</code>; the API rewrites loopback for the nginx container). Issue TLS on the <strong>Certificates</strong> page when needed.</p>
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="cancelModalNewProxy">Cancel</button>
+          <button type="submit">Create proxy host</button>
+        </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="modalAddCert" class="modal-backdrop" aria-hidden="true" role="presentation">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalAddCertTitle">
+        <div class="modal-header">
+          <h2 id="modalAddCertTitle">New Certificate</h2>
+          <button type="button" class="modal-close" id="closeModalAddCert" aria-label="Close">&times;</button>
+        </div>
+        <form id="formCert">
         <label for="cert_name">Server name</label>
         <input id="cert_name" name="server_name" type="text" required pattern="[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|[a-zA-Z0-9]" placeholder="app.example.com">
 
@@ -145,23 +172,76 @@
           <option value="dns">DNS-01 (manual TXT record)</option>
         </select>
 
-        <div id="cert_upstream_wrap" class="hidden">
-          <label for="cert_upstream">Upstream URL (only if no vhost file yet; DNS-01)</label>
-          <input id="cert_upstream" name="upstream" type="url" placeholder="http://host.docker.internal:3000">
+        <p class="hint" style="margin-bottom: 0.85rem;">HTTP-01: create a proxy host for this name first. DNS-01: no vhost required. After issuance, open <strong>Proxy Hosts</strong> → <strong>Edit</strong> and choose this certificate to enable HTTPS.</p>
+
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="cancelModalAddCert">Cancel</button>
+          <button type="submit">Run certbot</button>
         </div>
-
-        <p class="hint" style="margin-bottom: 0.85rem;">Expects an HTTP vhost for that name (e.g. from Proxy Hosts), unless you use DNS-01 with upstream only. Preserves <code>proxy_pass</code> from the existing file when present.</p>
-
-        <button type="submit">Run certbot</button>
-      </form>
-      <div id="certDnsJob" class="dns-box"></div>
-    </div>
+        </form>
+        <div id="certDnsJob" class="dns-box"></div>
+      </div>
     </div>
   </main>
   <script>
     const flashOk = document.getElementById('flashOk');
     const flashErr = document.getElementById('flashErr');
     let editStartHadSsl = false;
+    const modalNewProxy = document.getElementById('modalNewProxy');
+    const modalAddCert = document.getElementById('modalAddCert');
+
+    function setModalOpen(el, open) {
+      if (!el) return;
+      el.setAttribute('aria-hidden', open ? 'false' : 'true');
+      if (open) {
+        const f = el.querySelector('form input, form select, form button, form textarea');
+        if (f) f.focus();
+      }
+    }
+    function openNewProxyModal() {
+      document.getElementById('formCreate').reset();
+      setModalOpen(modalNewProxy, true);
+    }
+    function closeNewProxyModal() {
+      setModalOpen(modalNewProxy, false);
+    }
+    function openAddCertModal() {
+      document.getElementById('formCert').reset();
+      const d = document.getElementById('certDnsJob');
+      d.classList.remove('show');
+      d.innerHTML = '';
+      setModalOpen(modalAddCert, true);
+    }
+    function closeAddCertModal() {
+      setModalOpen(modalAddCert, false);
+    }
+
+    document.getElementById('openModalNewProxy').addEventListener('click', openNewProxyModal);
+    document.getElementById('openModalAddCert').addEventListener('click', openAddCertModal);
+    document.getElementById('closeModalNewProxy').addEventListener('click', closeNewProxyModal);
+    document.getElementById('cancelModalNewProxy').addEventListener('click', closeNewProxyModal);
+    document.getElementById('closeModalAddCert').addEventListener('click', closeAddCertModal);
+    document.getElementById('cancelModalAddCert').addEventListener('click', closeAddCertModal);
+    function modalBackdropClick(ev) {
+      if (ev.currentTarget === ev.target) {
+        if (ev.currentTarget === modalNewProxy) closeNewProxyModal();
+        if (ev.currentTarget === modalAddCert) closeAddCertModal();
+      }
+    }
+    modalNewProxy.addEventListener('click', modalBackdropClick);
+    modalAddCert.addEventListener('click', modalBackdropClick);
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if (modalAddCert.getAttribute('aria-hidden') === 'false') {
+        closeAddCertModal();
+        e.preventDefault();
+        return;
+      }
+      if (modalNewProxy.getAttribute('aria-hidden') === 'false') {
+        closeNewProxyModal();
+        e.preventDefault();
+      }
+    });
 
     function showView(which) {
       const proxies = document.getElementById('viewProxies');
@@ -204,6 +284,18 @@
         .replace(/"/g, '&quot;');
     }
 
+    function usedByLine(row) {
+      if (!row.used_by || !row.used_by.length) return '—';
+      return row.used_by
+        .map((u) => {
+          const f = u.filename || '';
+          const sn = (u.server_names && u.server_names.length) ? u.server_names.join(', ') : '';
+          const fileCell = '<code>' + escapeHtml(f) + '</code>';
+          return sn ? fileCell + ' <span style="color:var(--muted)">(' + escapeHtml(sn) + ')</span>' : fileCell;
+        })
+        .join('<br>');
+    }
+
     async function loadCertificateList() {
       const wrap = document.getElementById('certTableWrap');
       if (!wrap) return;
@@ -213,20 +305,57 @@
         if (!r.ok) throw new Error(d.error || r.statusText);
         const list = d.certificates || [];
         if (list.length === 0) {
-          wrap.innerHTML = '<p style="color: var(--muted); margin:0;">No certificates found yet. Use <strong>Add certificate</strong> below.</p>';
+          wrap.innerHTML = '<p style="color: var(--muted); margin:0;">No certificates found yet. Use the <strong>New Certificate</strong> button above to create one.</p>';
           return;
         }
         wrap.innerHTML = `
           <table>
-            <thead><tr><th>Certificate (live directory)</th></tr></thead>
+            <thead><tr><th>Certificate (live directory)</th><th>In use</th><th>By host(s)</th><th></th></tr></thead>
             <tbody>
-              ${list.map((c) => `<tr><td><code>${escapeHtml(c)}</code></td></tr>`).join('')}
+              ${list.map((c) => `
+                <tr>
+                  <td><code>${escapeHtml(c.name)}</code></td>
+                  <td>${c.in_use ? '<span style="color:var(--ok)">yes</span>' : '<span style="color:var(--muted)">no</span>'}</td>
+                  <td class="used-by-col">${usedByLine(c)}</td>
+                  <td class="row" style="white-space: nowrap;">
+                    <a class="button-link secondary" href="/api/certificates/${encodeURIComponent(c.name)}/download">Download</a>
+                    <button type="button" class="danger" data-cert-del="${escapeHtml(c.name)}" ${c.in_use ? ' disabled title="Remove from proxy hosts first"' : ''}>Delete</button>
+                  </td>
+                </tr>
+              `).join('')}
             </tbody>
           </table>`;
+        wrap.querySelectorAll('[data-cert-del]').forEach((btn) => {
+          if (btn.disabled) return;
+          btn.addEventListener('click', async () => {
+            const certName = btn.getAttribute('data-cert-del');
+            if (!certName) return;
+            if (!confirm('Delete certificate ' + certName + '? This runs certbot delete and cannot be undone.')) return;
+            try {
+              const dr = await fetch('/api/certificates/' + encodeURIComponent(certName), { method: 'DELETE' });
+              const j = await dr.json();
+              if (dr.status === 409) {
+                const u = (j.used_by || []).map((x) => x.filename).filter(Boolean);
+                showErr('Certificate is in use' + (u.length ? ' by: ' + u.join(', ') : ''));
+                return;
+              }
+              if (!dr.ok) throw new Error(j.error || dr.statusText);
+              showOk('Certificate deleted');
+              void loadCertificateList();
+            } catch (e) {
+              showErr(String(e.message || e));
+            }
+          });
+        });
       } catch (e) {
         wrap.innerHTML = '<p style="color:var(--danger)">Failed to load certificates.</p>';
         showErr(String(e.message || e));
       }
+    }
+
+    function certificateNamesFromApi(data) {
+      const rows = data.certificates || [];
+      return rows.map((c) => (typeof c === 'string' ? c : c.name));
     }
 
     async function fillEditCertificateOptions(currentName) {
@@ -235,7 +364,7 @@
       const r = await fetch('/api/certificates');
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || r.statusText);
-      const certs = d.certificates || [];
+      const certs = certificateNamesFromApi(d);
       for (const c of certs) {
         const o = document.createElement('option');
         o.value = c;
@@ -255,14 +384,6 @@
         sel.value = '';
       }
     }
-
-    document.getElementById('issue_cert').addEventListener('change', function () {
-      document.getElementById('createChallengeWrap').classList.toggle('hidden', !this.checked);
-    });
-
-    document.getElementById('cert_challenge').addEventListener('change', function () {
-      document.getElementById('cert_upstream_wrap').classList.toggle('hidden', this.value !== 'dns');
-    });
 
     function pollDnsJob(jobId, boxEl, onDone) {
       boxEl.classList.add('show');
@@ -305,7 +426,7 @@
             return;
           }
           if (j.done && j.status === 'success') {
-            boxEl.innerHTML = '<p style="color:var(--ok); margin:0;">Certificate issued and TLS vhost written.</p>';
+            boxEl.innerHTML = '<p style="color:var(--ok); margin:0;">Certificate issued. Use Proxy Hosts → Edit to assign it.</p>';
             if (onDone) onDone();
             return;
           }
@@ -361,6 +482,7 @@
               showOk('Deleted ' + name);
               document.getElementById('editPanel').style.display = 'none';
               await loadVhosts();
+              void loadCertificateList();
             } catch (e) {
               showErr(String(e.message || e));
             }
@@ -439,36 +561,18 @@
       ev.preventDefault();
       const server_name = document.getElementById('server_name').value.trim();
       const upstream = document.getElementById('upstream').value.trim();
-      const email = document.getElementById('email').value.trim();
-      const issue_cert = document.getElementById('issue_cert').checked;
-      const challenge = document.getElementById('create_challenge').value || 'http';
-      const dnsBox = document.getElementById('createDnsJob');
-      dnsBox.classList.remove('show');
-      dnsBox.innerHTML = '';
       try {
         const r = await fetch('/api/vhosts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            server_name,
-            upstream,
-            email: email || undefined,
-            issue_cert,
-            challenge: issue_cert ? challenge : 'http',
-          }),
+          body: JSON.stringify({ server_name, upstream }),
         });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || r.statusText);
-        if (data.asyncCert && data.jobId) {
-          showOk('Vhost saved. Complete DNS steps for the certificate.');
-          pollDnsJob(data.jobId, dnsBox, afterCertOrVhostChange);
-        } else {
-          showOk('Vhost saved' + (issue_cert ? ' and certificate issued.' : '.'));
-        }
+        showOk('Proxy host created.');
         ev.target.reset();
-        document.getElementById('createChallengeWrap').classList.add('hidden');
         await loadVhosts();
-        if (issue_cert && !data.asyncCert) void loadCertificateList();
+        closeNewProxyModal();
       } catch (e) {
         showErr(String(e.message || e));
       }
@@ -479,13 +583,11 @@
       const server_name = document.getElementById('cert_name').value.trim();
       const email = document.getElementById('cert_email').value.trim();
       const challenge = document.getElementById('cert_challenge').value;
-      const upstream = document.getElementById('cert_upstream').value.trim();
       const dnsBox = document.getElementById('certDnsJob');
       dnsBox.classList.remove('show');
       dnsBox.innerHTML = '';
       try {
         const body = { server_name, email, challenge };
-        if (challenge === 'dns' && upstream) body.upstream = upstream;
         const r = await fetch('/api/cert', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -495,10 +597,14 @@
         if (!r.ok) throw new Error(data.error || r.statusText);
         if (data.asyncCert && data.jobId) {
           showOk('Add the TXT record when shown, then continue.');
-          pollDnsJob(data.jobId, dnsBox, afterCertOrVhostChange);
+          pollDnsJob(data.jobId, dnsBox, function () {
+            afterCertOrVhostChange();
+            closeAddCertModal();
+          });
         } else {
-          showOk('Certificate issued and TLS vhost written.');
+          showOk('Certificate issued. Use Proxy Hosts → Edit to assign it to a host.');
           afterCertOrVhostChange();
+          closeAddCertModal();
         }
       } catch (e) {
         showErr(String(e.message || e));

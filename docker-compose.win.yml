@@ -10,8 +10,8 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./conf.d:/etc/nginx/conf.d:rw
-      - ./certs:/etc/letsencrypt:rw
-      - ./acme-webroot:/var/www/certbot:rw
+      - letsencrypt_data:/etc/letsencrypt:rw
+      - acme_webroot:/var/www/certbot:rw
     restart: unless-stopped
 
   vhost-ui:
@@ -23,7 +23,11 @@ services:
       NGINX_CONTAINER: nginx_host
     volumes:
       - ./conf.d:/etc/nginx/conf.d:rw
-      - ./certs:/etc/letsencrypt:rw
-      - ./acme-webroot:/var/www/certbot:rw
+      - letsencrypt_data:/etc/letsencrypt:rw
+      - acme_webroot:/var/www/certbot:rw
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
+
+volumes:
+  letsencrypt_data:
+  acme_webroot:

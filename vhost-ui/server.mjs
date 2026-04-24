@@ -1,3 +1,4 @@
+import archiver from "archiver";
 import express from "express";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -193,29 +194,9 @@ function parseConfText(text) {
   };
 }
 
-async function readUpstreamForDomain(domain) {
-  const target = confPathForDomain(domain);
-  const text = await fs.readFile(target, "utf8");
-  const m = text.match(/proxy_pass\s+([^;]+);/);
-  if (!m) {
-    const err = new Error("no proxy_pass in vhost");
-    err.code = "NO_PROXY";
-    throw err;
-  }
-  return upstreamForNginxContainer(m[1].trim());
-}
-
 async function finishDnsJob(job, code, stderr) {
   if (code === 0) {
-    try {
-      const target = confPathForDomain(job.domain);
-      await fs.writeFile(target, tlsServerBlocks(job.domain, job.upstream), "utf8");
-      await reloadNginx();
-      job.status = "success";
-    } catch (e) {
-      job.status = "error";
-      job.error = String(e.message ?? e);
-    }
+    job.status = "success";
   } else {
     job.status = "error";
     job.error = stderr?.trim() || `certbot exited with code ${code}`;
@@ -227,9 +208,8 @@ async function finishDnsJob(job, code, stderr) {
 /**
  * @param {string} domain
  * @param {string} email
- * @param {string} upstreamForTls normalized upstream for nginx
  */
-async function startDnsCertJob(domain, email, upstreamForTls) {
+async function startDnsCertJob(domain, email) {
   for (const j of dnsJobs.values()) {
     if (j.domain === domain && !j.done) {
       throw new Error("a certificate job is already running for this domain");
@@ -245,7 +225,6 @@ async function startDnsCertJob(domain, email, upstreamForTls) {
     id,
     domain,
     email,
-    upstream: upstreamForTls,
     status: "starting",
     txtName: null,
     txtValue: null,
@@ -373,6 +352,42 @@ async function listCertNames() {
   return out;
 }
 
+/**
+ * vhost conf files in CONF_DIR (excluding default) that reference a live cert name in ssl_certificate.
+ * @returns {Promise<Map<string, { filename: string, server_names: string[] }[]>>}
+ */
+async function vhostsUsingCertName() {
+  const map = new Map();
+  const entries = await fs.readdir(CONF_DIR, { withFileTypes: true });
+  for (const e of entries) {
+    if (!e.isFile() || !e.name.endsWith(".conf")) continue;
+    if (SKIP_LIST.has(e.name)) continue;
+    const full = path.join(CONF_DIR, e.name);
+    const text = await fs.readFile(full, "utf8");
+    const meta = parseConfText(text);
+    if (!meta.ssl_cert_name) continue;
+    const k = meta.ssl_cert_name;
+    if (!map.has(k)) {
+      map.set(k, []);
+    }
+    map.get(k).push({ filename: e.name, server_names: meta.server_names || [] });
+  }
+  return map;
+}
+
+async function listCertificatesWithUsage() {
+  const names = await listCertNames();
+  const usage = await vhostsUsingCertName();
+  return names.map((name) => {
+    const used = usage.get(name) || [];
+    return {
+      name,
+      in_use: used.length > 0,
+      used_by: used,
+    };
+  });
+}
+
 async function assertCertificateExists(name) {
   await fs.access(path.join(LETSENCRYPT_LIVE, name, "fullchain.pem"));
   await fs.access(path.join(LETSENCRYPT_LIVE, name, "privkey.pem"));
@@ -391,9 +406,97 @@ app.get("/api/vhosts", async (_req, res) => {
 
 app.get("/api/certificates", async (_req, res) => {
   try {
-    res.json({ certificates: await listCertNames() });
+    res.json({ certificates: await listCertificatesWithUsage() });
   } catch (e) {
     res.status(500).json({ error: String(e.message ?? e) });
+  }
+});
+
+app.get("/api/certificates/:name/download", async (req, res) => {
+  let name;
+  try {
+    name = safeCertificateName(String(req.params.name || ""));
+  } catch {
+    res.status(400).json({ error: "invalid certificate name" });
+    return;
+  }
+  if (!name) {
+    res.status(400).json({ error: "invalid certificate name" });
+    return;
+  }
+  try {
+    await assertCertificateExists(name);
+  } catch (e) {
+    if (e?.code === "ENOENT") {
+      res.status(404).json({ error: "certificate not found" });
+      return;
+    }
+    res.status(500).json({ error: String(e.message ?? e) });
+    return;
+  }
+  const certDir = path.join(LETSENCRYPT_LIVE, name);
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${name.replace(/[^\w!-.]/g, "_")}.zip"`,
+  );
+  const archive = archiver("zip", { zlib: { level: 9 } });
+  archive.on("error", (err) => {
+    if (!res.headersSent) {
+      res.status(500).json({ error: String(err.message) });
+    }
+  });
+  archive.pipe(res);
+  archive.file(path.join(certDir, "fullchain.pem"), { name: "fullchain.pem" });
+  archive.file(path.join(certDir, "privkey.pem"), { name: "privkey.pem" });
+  try {
+    await archive.finalize();
+  } catch (e) {
+    if (!res.headersSent) {
+      res.status(500).json({ error: String(e.message ?? e) });
+    }
+  }
+});
+
+app.delete("/api/certificates/:name", async (req, res) => {
+  let name;
+  try {
+    name = safeCertificateName(String(req.params.name || ""));
+  } catch {
+    res.status(400).json({ error: "invalid certificate name" });
+    return;
+  }
+  if (!name) {
+    res.status(400).json({ error: "invalid certificate name" });
+    return;
+  }
+  try {
+    const used = (await vhostsUsingCertName()).get(name) || [];
+    if (used.length > 0) {
+      res.status(409).json({
+        error: "certificate is in use by a proxy host",
+        used_by: used,
+      });
+      return;
+    }
+    try {
+      await assertCertificateExists(name);
+    } catch (e) {
+      if (e?.code === "ENOENT") {
+        res.status(404).json({ error: "certificate not found" });
+        return;
+      }
+      throw e;
+    }
+    await execFileAsync(
+      "certbot",
+      ["delete", "--cert-name", name, "--non-interactive", "--config-dir", path.dirname(LETSENCRYPT_LIVE)],
+      { timeout: 120_000 },
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    const msg = String((e && e.stderr) || (e && e.stdout) || e?.message || e);
+    res.status(500).json({ error: msg });
   }
 });
 
@@ -481,34 +584,12 @@ app.put("/api/vhosts/:name", async (req, res) => {
 
 app.post("/api/vhosts", async (req, res) => {
   try {
-    const { server_name: domain, upstream: up, email, issue_cert: issue, challenge: ch } = req.body ?? {};
-    const challenge = ch === "dns" ? "dns" : "http";
+    const { server_name: domain, upstream: up } = req.body ?? {};
     validateDomain(domain);
     const upstream = upstreamForNginxContainer(validateUpstream(up));
-    if (issue && (!email || !String(email).includes("@"))) {
-      res.status(400).json({ error: "email required for certificate issuance" });
-      return;
-    }
     const target = confPathForDomain(domain);
     await fs.writeFile(target, httpServerBlock(domain, upstream), "utf8");
     await reloadNginx();
-    if (issue) {
-      if (challenge === "dns") {
-        const job = await startDnsCertJob(domain, String(email).trim(), upstream);
-        res.json({ ok: true, asyncCert: true, jobId: job.id });
-        return;
-      }
-      try {
-        await runCertbotHttp(domain, String(email).trim());
-        await fs.writeFile(target, tlsServerBlocks(domain, upstream), "utf8");
-        await reloadNginx();
-      } catch (ce) {
-        res.status(500).json({
-          error: `vhost saved; certbot failed: ${ce.stderr ?? ce.message ?? ce}`,
-        });
-        return;
-      }
-    }
     res.json({ ok: true });
   } catch (e) {
     const msg = String(e.message ?? e);
@@ -555,7 +636,7 @@ app.post("/api/cert/jobs/:id/continue", async (req, res) => {
 
 app.post("/api/cert", async (req, res) => {
   try {
-    const { server_name: domain, email, challenge: ch, upstream: upBody } = req.body ?? {};
+    const { server_name: domain, email, challenge: ch } = req.body ?? {};
     const challenge = ch === "dns" ? "dns" : "http";
     validateDomain(domain);
     if (!email || !String(email).includes("@")) {
@@ -563,41 +644,26 @@ app.post("/api/cert", async (req, res) => {
       return;
     }
 
-    let upstream;
-    try {
-      upstream = await readUpstreamForDomain(domain);
-    } catch (e) {
-      if (e?.code === "ENOENT") {
-        if (challenge === "http") {
-          res.status(400).json({ error: "create HTTP vhost for this name first" });
+    if (challenge === "http") {
+      const target = confPathForDomain(domain);
+      try {
+        await fs.access(target);
+      } catch (e) {
+        if (e?.code === "ENOENT") {
+          res
+            .status(400)
+            .json({ error: "create an HTTP proxy host for this name first (needed for the ACME challenge)" });
           return;
         }
-        if (!upBody || !String(upBody).trim()) {
-          res.status(400).json({
-            error: "no vhost file; pass upstream URL for DNS issuance",
-          });
-          return;
-        }
-        upstream = upstreamForNginxContainer(validateUpstream(String(upBody).trim()));
-      } else if (e?.code === "NO_PROXY") {
-        res.status(400).json({ error: "no proxy_pass in existing vhost" });
-        return;
-      } else {
         throw e;
       }
-    }
-
-    if (challenge === "dns") {
-      const job = await startDnsCertJob(domain, String(email).trim(), upstream);
-      res.json({ ok: true, asyncCert: true, jobId: job.id });
+      await runCertbotHttp(domain, String(email).trim());
+      res.json({ ok: true });
       return;
     }
 
-    const target = confPathForDomain(domain);
-    await runCertbotHttp(domain, String(email).trim());
-    await fs.writeFile(target, tlsServerBlocks(domain, upstream), "utf8");
-    await reloadNginx();
-    res.json({ ok: true });
+    const job = await startDnsCertJob(domain, String(email).trim());
+    res.json({ ok: true, asyncCert: true, jobId: job.id });
   } catch (e) {
     res.status(500).json({ error: String(e.stderr ?? e.message ?? e) });
   }
