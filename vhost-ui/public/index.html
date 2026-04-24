@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nginx vhost admin</title>
+  <style>
+    :root { --bg: #0f1419; --panel: #1a2332; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --danger: #f85149; --ok: #3fb950; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; line-height: 1.5; }
+    main { max-width: 52rem; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 1rem; }
+    h2 { font-size: 1.05rem; font-weight: 600; margin: 2rem 0 0.75rem; color: var(--muted); }
+    .panel { background: var(--panel); border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.25rem; }
+    input[type="text"], input[type="email"], input[type="url"], select {
+      width: 100%; padding: 0.5rem 0.65rem; border: 1px solid #30363d; border-radius: 6px;
+      background: var(--bg); color: var(--text); margin-bottom: 0.85rem;
+    }
+    button { padding: 0.45rem 0.9rem; border-radius: 6px; border: none; background: var(--accent); color: #fff; font-weight: 500; cursor: pointer; font-size: 0.9rem; }
+    button.secondary { background: #30363d; color: var(--text); }
+    button.danger { background: var(--danger); }
+    form button[type="submit"] { display: block; margin-top: 0.35rem; }
+    .edit-actions { display: flex; gap: 0.5rem; margin-top: 0.35rem; }
+    .edit-actions button { flex: 1; margin-top: 0; min-width: 0; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .flash { padding: 0.65rem 1rem; border-radius: 6px; margin-bottom: 1rem; display: none; }
+    .flash.show { display: block; }
+    .flash.ok { background: rgba(63, 185, 80, 0.15); border: 1px solid var(--ok); }
+    .flash.err { background: rgba(248, 81, 73, 0.12); border: 1px solid var(--danger); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 0.5rem 0.65rem; border-bottom: 1px solid #30363d; vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; }
+    code { font-size: 0.85em; background: var(--bg); padding: 0.15rem 0.35rem; border-radius: 4px; }
+    .hint { font-size: 0.8rem; color: var(--muted); line-height: 1.45; margin-top: -0.5rem; margin-bottom: 0.85rem; }
+    form + .hint { margin-top: 0.85rem; }
+    .dns-box { display: none; margin-top: 0.75rem; padding: 0.75rem; background: var(--bg); border-radius: 6px; border: 1px solid #30363d; }
+    .dns-box.show { display: block; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <div id="flashOk" class="flash ok"></div>
+    <div id="flashErr" class="flash err"></div>
+
+    <h1>nginx vhost admin</h1>
+    <p style="color: var(--muted); margin-top: -0.5rem;">Manage <code>conf.d</code> and Let&apos;s Encrypt (HTTP-01 webroot or DNS-01 manual TXT).</p>
+
+    <div class="panel">
+      <h2 style="margin-top:0;">New vhost</h2>
+      <form id="formCreate">
+        <label for="server_name">Server name</label>
+        <input id="server_name" name="server_name" type="text" placeholder="app.example.com" required pattern="[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|[a-zA-Z0-9]" autocomplete="off">
+
+        <label for="upstream">Upstream URL</label>
+        <input id="upstream" name="upstream" type="url" placeholder="http://host.docker.internal:3000" required>
+        <p class="hint" style="margin-bottom: 0.75rem;">Host apps: use <code>host.docker.internal</code> (or <code>127.0.0.1</code>; the API rewrites loopback for the nginx container).</p>
+
+        <label for="email">Let&apos;s Encrypt email</label>
+        <input id="email" name="email" type="email" placeholder="you@example.com">
+
+        <label class="row" style="margin-bottom: 0.75rem;">
+          <input id="issue_cert" name="issue_cert" type="checkbox" style="width: auto; margin: 0 0.5rem 0 0;">
+          Request certificate after save
+        </label>
+        <div id="createChallengeWrap" class="hidden">
+          <label for="create_challenge">Challenge</label>
+          <select id="create_challenge" name="challenge">
+            <option value="http">HTTP-01 (webroot on this nginx)</option>
+            <option value="dns">DNS-01 (TXT at your DNS provider)</option>
+          </select>
+          <p class="hint" style="margin-bottom: 0.75rem;">HTTP-01 needs port 80 reachable for the hostname. DNS-01 works when HTTP cannot (e.g. internal names).</p>
+        </div>
+        <p class="hint" style="margin-bottom: 0.75rem;">If using HTTP-01, DNS must point here and port 80 must answer for that name.</p>
+        <button type="submit">Create vhost</button>
+      </form>
+      <div id="createDnsJob" class="dns-box"></div>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin-top:0;">Vhosts</h2>
+      <div id="vhostTableWrap"><p style="color: var(--muted);">Loading…</p></div>
+    </div>
+
+    <div class="panel" id="editPanel" style="display: none;">
+      <h2 style="margin-top:0;">Edit vhost</h2>
+      <form id="formEdit">
+        <input type="hidden" id="edit_filename" name="filename">
+        <label for="edit_server_name">Server name</label>
+        <input id="edit_server_name" name="server_name" type="text" required pattern="[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|[a-zA-Z0-9]">
+        <p id="edit_rename_hint" class="hint" style="margin-bottom: 0.75rem;"></p>
+
+        <label for="edit_upstream">Upstream URL</label>
+        <input id="edit_upstream" name="upstream" type="url" required>
+
+        <div class="edit-actions">
+          <button type="submit">Save</button>
+          <button type="button" class="secondary" id="edit_cancel">Cancel</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin-top:0;">Issue certificate</h2>
+      <form id="formCert">
+        <label for="cert_name">Server name</label>
+        <input id="cert_name" name="server_name" type="text" required pattern="[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|[a-zA-Z0-9]" placeholder="app.example.com">
+
+        <label for="cert_email">Email</label>
+        <input id="cert_email" name="email" type="email" required placeholder="you@example.com">
+
+        <label for="cert_challenge">Challenge</label>
+        <select id="cert_challenge" name="challenge">
+          <option value="http">HTTP-01 (webroot)</option>
+          <option value="dns">DNS-01 (manual TXT record)</option>
+        </select>
+
+        <div id="cert_upstream_wrap" class="hidden">
+          <label for="cert_upstream">Upstream URL (only if no vhost file yet; DNS-01)</label>
+          <input id="cert_upstream" name="upstream" type="url" placeholder="http://host.docker.internal:3000">
+        </div>
+
+        <p class="hint" style="margin-bottom: 0.85rem;">Expects an HTTP vhost for that name (e.g. created above), unless you use DNS-01 with upstream only. Preserves <code>proxy_pass</code> from the existing file when present.</p>
+
+        <button type="submit">Run certbot</button>
+      </form>
+      <div id="certDnsJob" class="dns-box"></div>
+    </div>
+  </main>
+  <script>
+    const flashOk = document.getElementById('flashOk');
+    const flashErr = document.getElementById('flashErr');
+
+    function showOk(msg) {
+      flashErr.classList.remove('show');
+      flashOk.textContent = msg;
+      flashOk.classList.add('show');
+    }
+    function showErr(msg) {
+      flashOk.classList.remove('show');
+      flashErr.textContent = msg;
+      flashErr.classList.add('show');
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    document.getElementById('issue_cert').addEventListener('change', function () {
+      document.getElementById('createChallengeWrap').classList.toggle('hidden', !this.checked);
+    });
+
+    document.getElementById('cert_challenge').addEventListener('change', function () {
+      document.getElementById('cert_upstream_wrap').classList.toggle('hidden', this.value !== 'dns');
+    });
+
+    function pollDnsJob(jobId, boxEl, onDone) {
+      boxEl.classList.add('show');
+      boxEl.innerHTML = '<p style="color:var(--muted); margin:0;">Starting certificate job…</p>';
+      let dnsUiShown = false;
+
+      const poll = async () => {
+        try {
+          const r = await fetch('/api/cert/jobs/' + encodeURIComponent(jobId));
+          const j = await r.json();
+          if (!r.ok) {
+            boxEl.innerHTML = '<p style="color:var(--danger)">' + escapeHtml(j.error || r.statusText) + '</p>';
+            return;
+          }
+          if (j.status === 'dns_wait' && j.txtName && j.txtValue) {
+            if (!dnsUiShown) {
+              dnsUiShown = true;
+              boxEl.innerHTML =
+                '<p style="margin:0 0 0.5rem;"><strong>Add this DNS TXT record</strong></p>' +
+                '<p style="margin:0.25rem 0;"><code style="word-break:break-all;">' + escapeHtml(j.txtName) + '</code></p>' +
+                '<p style="margin:0.25rem 0;"><code style="word-break:break-all;">' + escapeHtml(j.txtValue) + '</code></p>' +
+                '<p class="hint" style="margin:0.75rem 0;">Confirm the TXT is live (e.g. <code>dig TXT ' + escapeHtml(j.txtName) + ' @8.8.8.8</code>), then continue. The server waits for public DNS before asking Let&apos;s Encrypt.</p>' +
+                '<button type="button" class="dns-continue-btn">Continue (verify DNS)</button>';
+              boxEl.querySelector('.dns-continue-btn').onclick = async () => {
+                try {
+                  const cr = await fetch('/api/cert/jobs/' + encodeURIComponent(jobId) + '/continue', { method: 'POST' });
+                  const d = await cr.json();
+                  if (!cr.ok) throw new Error(d.error || cr.statusText);
+                  boxEl.innerHTML = '<p style="color:var(--muted); margin:0;">Verifying with Let&apos;s Encrypt…</p>';
+                  setTimeout(poll, 1500);
+                } catch (e) {
+                  boxEl.innerHTML = '<p style="color:var(--danger)">' + escapeHtml(String(e.message || e)) + '</p>';
+                }
+              };
+            }
+            return;
+          }
+          if (j.status === 'verifying' || j.status === 'starting') {
+            setTimeout(poll, 1000);
+            return;
+          }
+          if (j.done && j.status === 'success') {
+            boxEl.innerHTML = '<p style="color:var(--ok); margin:0;">Certificate issued and TLS vhost written.</p>';
+            if (onDone) onDone();
+            return;
+          }
+          if (j.done && j.status === 'error') {
+            boxEl.innerHTML = '<p style="color:var(--danger); margin:0; white-space:pre-wrap;">' + escapeHtml(j.error || 'failed') + '</p>';
+            return;
+          }
+          setTimeout(poll, 800);
+        } catch (e) {
+          boxEl.innerHTML = '<p style="color:var(--danger)">' + escapeHtml(String(e.message || e)) + '</p>';
+        }
+      };
+      void poll();
+    }
+
+    async function loadVhosts() {
+      const wrap = document.getElementById('vhostTableWrap');
+      try {
+        const r = await fetch('/api/vhosts');
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || r.statusText);
+        const vhosts = data.vhosts || [];
+        if (vhosts.length === 0) {
+          wrap.innerHTML = '<p style="color: var(--muted); margin:0;">No vhost configs (excluding <code>default.conf</code>).</p>';
+          return;
+        }
+        wrap.innerHTML = `
+          <table>
+            <thead><tr><th>File</th><th>Names</th><th>Upstream</th><th>HTTPS</th><th></th></tr></thead>
+            <tbody>
+              ${vhosts.map((v) => `
+                <tr>
+                  <td><code>${escapeHtml(v.filename)}</code></td>
+                  <td>${escapeHtml((v.server_names || []).join(', ') || '—')}</td>
+                  <td><code style="word-break:break-all;">${escapeHtml(v.upstream || '—')}</code></td>
+                  <td>${v.has_ssl ? '<span style="color:var(--ok)">yes</span>' : '<span style="color:var(--muted)">no</span>'}</td>
+                  <td class="row">
+                    <button type="button" class="secondary" data-edit="${escapeHtml(v.filename)}">Edit</button>
+                    <button type="button" class="danger" data-del="${escapeHtml(v.filename)}">Delete</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>`;
+        wrap.querySelectorAll('[data-del]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const name = btn.getAttribute('data-del');
+            if (!confirm('Delete ' + name + '?')) return;
+            try {
+              const dr = await fetch('/api/vhosts/' + encodeURIComponent(name), { method: 'DELETE' });
+              const d = await dr.json();
+              if (!dr.ok) throw new Error(d.error || dr.statusText);
+              showOk('Deleted ' + name);
+              document.getElementById('editPanel').style.display = 'none';
+              await loadVhosts();
+            } catch (e) {
+              showErr(String(e.message || e));
+            }
+          });
+        });
+        wrap.querySelectorAll('[data-edit]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const name = btn.getAttribute('data-edit');
+            try {
+              const r = await fetch('/api/vhosts/file/' + encodeURIComponent(name));
+              const v = await r.json();
+              if (!r.ok) throw new Error(v.error || r.statusText);
+              document.getElementById('edit_filename').value = v.filename;
+              document.getElementById('edit_server_name').value = (v.server_names && v.server_names[0]) || v.domain;
+              document.getElementById('edit_upstream').value = v.upstream || '';
+              const hint = document.getElementById('edit_rename_hint');
+              if (v.has_ssl) {
+                hint.textContent = 'HTTPS enabled: server name cannot be changed here; change upstream only or recreate.';
+                document.getElementById('edit_server_name').readOnly = true;
+              } else {
+                hint.textContent = 'Renaming updates the config file name (e.g. old.conf → newname.conf).';
+                document.getElementById('edit_server_name').readOnly = false;
+              }
+              document.getElementById('editPanel').style.display = 'block';
+              document.getElementById('editPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } catch (e) {
+              showErr(String(e.message || e));
+            }
+          });
+        });
+      } catch (e) {
+        wrap.innerHTML = '<p style="color:var(--danger)">Failed to load vhosts.</p>';
+        showErr(String(e.message || e));
+      }
+    }
+
+    document.getElementById('edit_cancel').addEventListener('click', () => {
+      document.getElementById('editPanel').style.display = 'none';
+    });
+
+    document.getElementById('formEdit').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const filename = document.getElementById('edit_filename').value;
+      const server_name = document.getElementById('edit_server_name').value.trim();
+      const upstream = document.getElementById('edit_upstream').value.trim();
+      try {
+        const r = await fetch('/api/vhosts/' + encodeURIComponent(filename), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ server_name, upstream }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || r.statusText);
+        showOk('Vhost updated.');
+        document.getElementById('editPanel').style.display = 'none';
+        await loadVhosts();
+      } catch (e) {
+        showErr(String(e.message || e));
+      }
+    });
+
+    document.getElementById('formCreate').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const server_name = document.getElementById('server_name').value.trim();
+      const upstream = document.getElementById('upstream').value.trim();
+      const email = document.getElementById('email').value.trim();
+      const issue_cert = document.getElementById('issue_cert').checked;
+      const challenge = document.getElementById('create_challenge').value || 'http';
+      const dnsBox = document.getElementById('createDnsJob');
+      dnsBox.classList.remove('show');
+      dnsBox.innerHTML = '';
+      try {
+        const r = await fetch('/api/vhosts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            server_name,
+            upstream,
+            email: email || undefined,
+            issue_cert,
+            challenge: issue_cert ? challenge : 'http',
+          }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || r.statusText);
+        if (data.asyncCert && data.jobId) {
+          showOk('Vhost saved. Complete DNS steps for the certificate.');
+          pollDnsJob(data.jobId, dnsBox, loadVhosts);
+        } else {
+          showOk('Vhost saved' + (issue_cert ? ' and certificate issued.' : '.'));
+        }
+        ev.target.reset();
+        document.getElementById('createChallengeWrap').classList.add('hidden');
+        await loadVhosts();
+      } catch (e) {
+        showErr(String(e.message || e));
+      }
+    });
+
+    document.getElementById('formCert').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const server_name = document.getElementById('cert_name').value.trim();
+      const email = document.getElementById('cert_email').value.trim();
+      const challenge = document.getElementById('cert_challenge').value;
+      const upstream = document.getElementById('cert_upstream').value.trim();
+      const dnsBox = document.getElementById('certDnsJob');
+      dnsBox.classList.remove('show');
+      dnsBox.innerHTML = '';
+      try {
+        const body = { server_name, email, challenge };
+        if (challenge === 'dns' && upstream) body.upstream = upstream;
+        const r = await fetch('/api/cert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || r.statusText);
+        if (data.asyncCert && data.jobId) {
+          showOk('Add the TXT record when shown, then continue.');
+          pollDnsJob(data.jobId, dnsBox, loadVhosts);
+        } else {
+          showOk('Certificate issued and TLS vhost written.');
+          await loadVhosts();
+        }
+      } catch (e) {
+        showErr(String(e.message || e));
+      }
+    });
+
+    loadVhosts();
+  </script>
+</body>
+</html>

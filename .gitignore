@@ -1,4 +1,8 @@
+vhost-ui/node_modules/
+
 certs/*
 !certs/.gitkeep
 conf.d/*
 !conf.d/default.conf
+acme-webroot/*
+!acme-webroot/.gitkeep

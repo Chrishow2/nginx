@@ -3,7 +3,11 @@ services:
   nginx:
     build: .
     container_name: nginx_host
-    network_mode: host
+    ports:
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:443:443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./conf.d:/etc/nginx/conf.d:rw
       - ./certs:/etc/letsencrypt:rw
