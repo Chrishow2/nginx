@@ -102,7 +102,7 @@
       <form id="formEdit">
         <input type="hidden" id="edit_filename" name="filename">
         <label for="edit_server_name">Server name</label>
-        <input id="edit_server_name" name="server_name" type="text" required pattern="[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|[a-zA-Z0-9]">
+        <input id="edit_server_name" name="server_name" type="text" required>
         <p id="edit_rename_hint" class="hint" style="margin-bottom: 0.75rem;"></p>
 
         <label for="edit_upstream">Upstream URL</label>
@@ -140,7 +140,7 @@
         </div>
         <form id="formCreate">
         <label for="server_name">Server name</label>
-        <input id="server_name" name="server_name" type="text" placeholder="app.example.com" required pattern="[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|[a-zA-Z0-9]" autocomplete="off">
+        <input id="server_name" name="server_name" type="text" placeholder="app.example.com" required autocomplete="off">
 
         <label for="upstream">Upstream URL</label>
         <input id="upstream" name="upstream" type="url" placeholder="http://127.0.0.1:3000" required>
@@ -161,7 +161,7 @@
         </div>
         <form id="formCert">
         <label for="cert_name">Server name</label>
-        <input id="cert_name" name="server_name" type="text" required pattern="[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|[a-zA-Z0-9]" placeholder="app.example.com">
+        <input id="cert_name" name="server_name" type="text" required placeholder="app.example.com">
 
         <label for="cert_email">Email</label>
         <input id="cert_email" name="email" type="email" required placeholder="you@example.com">
