@@ -143,8 +143,8 @@
         <input id="server_name" name="server_name" type="text" placeholder="app.example.com" required pattern="[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]|[a-zA-Z0-9]" autocomplete="off">
 
         <label for="upstream">Upstream URL</label>
-        <input id="upstream" name="upstream" type="url" placeholder="http://host.docker.internal:3000" required>
-        <p class="hint" style="margin-bottom: 0.75rem;">Host apps: use <code>host.docker.internal</code> (or <code>127.0.0.1</code>; the API rewrites loopback for the nginx container). Issue TLS on the <strong>Certificates</strong> page when needed.</p>
+        <input id="upstream" name="upstream" type="url" placeholder="http://127.0.0.1:3000" required>
+        <p class="hint" style="margin-bottom: 0.75rem;">Upstream is saved exactly as entered. With nginx on <code>network_mode: host</code>, <code>127.0.0.1</code> targets the host; in bridge mode use the host gateway (e.g. <code>host.docker.internal</code> on Docker Desktop). Issue TLS on the <strong>Certificates</strong> page when needed.</p>
         <div class="modal-actions">
           <button type="button" class="secondary" id="cancelModalNewProxy">Cancel</button>
           <button type="submit">Create proxy host</button>

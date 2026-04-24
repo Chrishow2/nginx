@@ -16,8 +16,6 @@ const LETSENCRYPT_LIVE = process.env.LETSENCRYPT_LIVE ?? "/etc/letsencrypt/live"
 const WEBROOT = process.env.ACME_WEBROOT ?? "/var/www/certbot";
 const NGINX_CONTAINER = process.env.NGINX_CONTAINER ?? "nginx_host";
 const PORT = Number(process.env.PORT ?? "8080", 10);
-const PROXY_TO_HOST_ALIAS = process.env.PROXY_TO_HOST_ALIAS ?? "host.docker.internal";
-
 const DNS_TMP = path.join(__dirname, "tmp", "dns");
 const AUTH_HOOK = path.join(__dirname, "hooks", "dns-auth.sh");
 const CLEANUP_HOOK = path.join(__dirname, "hooks", "dns-cleanup.sh");
@@ -97,34 +95,6 @@ function validateUpstream(u) {
   return url.toString().replace(/\/$/, "") || u;
 }
 
-function upstreamForNginxContainer(u) {
-  if (!PROXY_TO_HOST_ALIAS) return u;
-  try {
-    const url = new URL(u);
-    if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
-      url.hostname = PROXY_TO_HOST_ALIAS;
-      return url.toString().replace(/\/$/, "");
-    }
-  } catch {
-    /* fall through */
-  }
-  return u;
-}
-
-function upstreamForDisplay(u) {
-  if (!PROXY_TO_HOST_ALIAS || !u) return u;
-  try {
-    const url = new URL(u);
-    if (url.hostname === PROXY_TO_HOST_ALIAS) {
-      url.hostname = "127.0.0.1";
-      return url.toString().replace(/\/$/, "");
-    }
-  } catch {
-    /* fall through */
-  }
-  return u;
-}
-
 function confPathForDomain(domain) {
   return path.join(CONF_DIR, `${domain}.conf`);
 }
@@ -189,7 +159,7 @@ function parseConfText(text) {
     server_names: names,
     has_ssl: hasSsl,
     upstream: upstreamRaw,
-    upstream_display: upstreamRaw ? upstreamForDisplay(upstreamRaw) : null,
+    upstream_display: upstreamRaw,
     ssl_cert_name,
   };
 }
@@ -539,7 +509,7 @@ app.put("/api/vhosts/:name", async (req, res) => {
     const body = req.body ?? {};
     const newDomain = (body.server_name?.trim() || oldDomain);
     validateDomain(newDomain);
-    const up = upstreamForNginxContainer(validateUpstream(body.upstream));
+    const up = validateUpstream(body.upstream);
     const certIn = body.certificate;
     const certPicked = certIn != null && String(certIn).trim() !== "";
     const certName = certPicked ? safeCertificateName(String(certIn)) : null;
@@ -586,7 +556,7 @@ app.post("/api/vhosts", async (req, res) => {
   try {
     const { server_name: domain, upstream: up } = req.body ?? {};
     validateDomain(domain);
-    const upstream = upstreamForNginxContainer(validateUpstream(up));
+    const upstream = validateUpstream(up);
     const target = confPathForDomain(domain);
     await fs.writeFile(target, httpServerBlock(domain, upstream), "utf8");
     await reloadNginx();
