@@ -17,6 +17,7 @@ services:
       - "127.0.0.1:81:8080"
     environment:
       NGINX_CONTAINER: nginx_host
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
     volumes:
       - ./conf.d:/etc/nginx/conf.d:rw
       - letsencrypt_data:/etc/letsencrypt:rw

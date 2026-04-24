@@ -19,6 +19,8 @@ const PORT = Number(process.env.PORT ?? "8080", 10);
 const DNS_TMP = path.join(__dirname, "tmp", "dns");
 const AUTH_HOOK = path.join(__dirname, "hooks", "dns-auth.sh");
 const CLEANUP_HOOK = path.join(__dirname, "hooks", "dns-cleanup.sh");
+const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN ?? "";
+const CLOUDFLARE_CRED_FILE = path.join(DNS_TMP, "cloudflare.ini");
 
 const DOMAIN_RE = /^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/;
 const SKIP_LIST = new Set(["default.conf"]);
@@ -131,6 +133,39 @@ async function runCertbotHttp(domain, email) {
     ],
     { timeout: 300_000 },
   );
+}
+
+async function runCertbotCloudflare(domain, email) {
+  const token = String(CLOUDFLARE_API_TOKEN).trim();
+  if (!token) {
+    const err = new Error("CLOUDFLARE_API_TOKEN is not set");
+    err.code = "NO_CF_TOKEN";
+    throw err;
+  }
+  await fs.mkdir(DNS_TMP, { recursive: true });
+  const ini = `dns_cloudflare_api_token = ${token}\n`;
+  await fs.writeFile(CLOUDFLARE_CRED_FILE, ini, { mode: 0o600 });
+  try {
+    await execFileAsync(
+      "certbot",
+      [
+        "certonly",
+        "--dns-cloudflare",
+        "--dns-cloudflare-credentials",
+        CLOUDFLARE_CRED_FILE,
+        "-d",
+        domain,
+        "--email",
+        email,
+        "--agree-tos",
+        "--non-interactive",
+        "--no-eff-email",
+      ],
+      { timeout: 300_000 },
+    );
+  } finally {
+    await fs.rm(CLOUDFLARE_CRED_FILE, { force: true });
+  }
 }
 
 function parseConfText(text) {
@@ -607,7 +642,7 @@ app.post("/api/cert/jobs/:id/continue", async (req, res) => {
 app.post("/api/cert", async (req, res) => {
   try {
     const { server_name: domain, email, challenge: ch } = req.body ?? {};
-    const challenge = ch === "dns" ? "dns" : "http";
+    const challenge = ch === "dns" ? "dns" : ch === "cloudflare" ? "cloudflare" : "http";
     validateDomain(domain);
     if (!email || !String(email).includes("@")) {
       res.status(400).json({ error: "valid email required" });
@@ -632,10 +667,27 @@ app.post("/api/cert", async (req, res) => {
       return;
     }
 
+    if (challenge === "cloudflare") {
+      if (!String(CLOUDFLARE_API_TOKEN).trim()) {
+        res.status(400).json({
+          error: "CLOUDFLARE_API_TOKEN is not set; add it to the vhost-ui service in docker-compose",
+        });
+        return;
+      }
+      await runCertbotCloudflare(domain, String(email).trim());
+      res.json({ ok: true });
+      return;
+    }
+
     const job = await startDnsCertJob(domain, String(email).trim());
     res.json({ ok: true, asyncCert: true, jobId: job.id });
   } catch (e) {
-    res.status(500).json({ error: String(e.stderr ?? e.message ?? e) });
+    const msg = String(e?.stderr ?? e?.message ?? e);
+    if (e?.code === "NO_CF_TOKEN" || /CLOUDFLARE_API_TOKEN/.test(msg)) {
+      res.status(400).json({ error: msg });
+      return;
+    }
+    res.status(500).json({ error: msg });
   }
 });
 

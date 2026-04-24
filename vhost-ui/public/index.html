@@ -170,9 +170,10 @@
         <select id="cert_challenge" name="challenge">
           <option value="http">HTTP-01 (webroot)</option>
           <option value="dns">DNS-01 (manual TXT record)</option>
+          <option value="cloudflare">DNS-01 (Cloudflare API)</option>
         </select>
 
-        <p class="hint" style="margin-bottom: 0.85rem;">HTTP-01: create a proxy host for this name first. DNS-01: no vhost required. After issuance, open <strong>Proxy Hosts</strong> → <strong>Edit</strong> and choose this certificate to enable HTTPS.</p>
+        <p class="hint" style="margin-bottom: 0.85rem;">HTTP-01: create a proxy host for this name first. Manual DNS-01: no vhost; follow TXT prompts. Cloudflare: zone must be on Cloudflare; set <code>CLOUDFLARE_API_TOKEN</code> in compose (API token with DNS:Edit for the zone). After issuance, use <strong>Proxy Hosts</strong> → <strong>Edit</strong> to assign the certificate.</p>
 
         <div class="modal-actions">
           <button type="button" class="secondary" id="cancelModalAddCert">Cancel</button>

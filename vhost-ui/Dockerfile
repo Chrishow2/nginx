@@ -3,7 +3,7 @@ FROM docker:27-cli AS dockercli
 FROM node:22-bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends certbot dnsutils \
+    && apt-get install -y --no-install-recommends certbot dnsutils python3-certbot-dns-cloudflare \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
