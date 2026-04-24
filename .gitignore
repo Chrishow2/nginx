@@ -1,5 +1,5 @@
 vhost-ui/node_modules/
-
+.env
 certs/*
 !certs/.gitkeep
 conf.d/*
